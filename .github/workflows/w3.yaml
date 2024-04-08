@@ -2,7 +2,7 @@ name: s3
 on:
   workflow_run:
     workflows:
-      - s2
+      - s22
     types: [completed]      
 jobs:
   set_config:

@@ -33,7 +33,8 @@ jobs:
       - run: |
           pwd
           ls -al
-      - name: 'Download artifact'
+
+      - name: Download artifact
         uses: actions/github-script@v6
         with:
           script: |
@@ -52,7 +53,7 @@ jobs:
                 archive_format: 'zip',
             });
             let fs = require('fs');
-            fs.writeFileSync(`${process.env.GITHUB_WORKSPACE}/inputdata.zip`, Buffer.from(download.data));
+            fs.writeFileSync(${process.env.GITHUB_WORKSPACE}/inputdata.zip, Buffer.from(download.data));
 
       - name: Set variables
         id: environment-var
@@ -117,4 +118,46 @@ jobs:
         with:
           name: inputdata
           path: data/
+
+  save_data_cluster_matching:
+    runs-on: ubuntu-latest
+    needs: set_config
+    if: ${{ always() && needs.set_config.result == 'success' }}
+    strategy:
+      matrix: ${{ fromJson(needs.set_config.outputs.regions-list) }}
+
+      - run: |
+          pwd
+          ls -al
+          
+      - name: Download artifact
+        uses: actions/github-script@v6
+        with:
+          script: |
+            let allArtifacts = await github.rest.actions.listWorkflowRunArtifacts({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: context.payload.workflow_run.id,
+            });
+            let matchArtifact = allArtifacts.data.artifacts.filter((artifact) => {
+              return artifact.name == "${{ inputs.ENV_VAR }}_${{ matrix.region }}"
+            })[0];
+            let download = await github.rest.actions.downloadArtifact({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                artifact_id: matchArtifact.id,
+                archive_format: 'zip',
+            });
+            let fs = require('fs');
+            fs.writeFileSync(${process.env.GITHUB_WORKSPACE}/${{ inputs.ENV_VAR }}_${{ matrix.region }}.zip, Buffer.from(download.data));
+
+      - name: Set variables
+        id: environment-var
+        run: |-
+            unzip ${{ inputs.ENV_VAR }}_${{ matrix.region }}.zip
+
+      - run: |
+          pwd
+          ls -al
+
 
