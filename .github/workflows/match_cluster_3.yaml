@@ -1,0 +1,154 @@
+name: s3
+on:
+  workflow_run:
+    workflows:
+      - s2
+    types: [completed]      
+jobs:
+  set_config:
+    runs-on: ubuntu-latest
+    # if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    # outputs:
+    #   regions-list: ${{ steps.environment.outputs.regions-list }}     
+    #   ENV_VAR: ${{ steps.environment-var.outputs.ENV_VAR }}
+    #   TARGET_BRANCH: ${{ steps.environment-var.outputs.TARGET_BRANCH }}
+    #   PR_NUMBER: ${{ steps.environment-var.outputs.PR_NUMBER }}    
+    steps:
+      - name: Download artifact
+        uses: actions/github-script@v6
+        with:
+          script: |
+            let allArtifacts = await github.rest.actions.listWorkflowRunArtifacts({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: context.payload.workflow_run.id,
+            });
+            let matchArtifact = allArtifacts.data.artifacts.filter((artifact) => {
+              return artifact.name == "inputdata"
+            })[0];
+            let download = await github.rest.actions.downloadArtifact({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                artifact_id: matchArtifact.id,
+                archive_format: 'zip',
+            });
+            let fs = require('fs');
+            fs.writeFileSync(`${process.env.GITHUB_WORKSPACE}/inputdata.zip`, Buffer.from(download.data));
+      - name: Set variables
+        id: environment-var
+        run: |-
+          unzip inputdata.zip
+          echo "ENV_VAR=$(cat environment)" >> "$GITHUB_OUTPUT"
+          echo "TARGET_BRANCH=$(cat targetbranch)" >> "$GITHUB_OUTPUT"
+          echo "PR_NUMBER=$(cat pr)" >> "$GITHUB_OUTPUT"
+      - name: Set Output Variables
+        id: environment
+        run: |
+          if [ $(cat environment) == "dev" ]; then
+            REGIONS='
+              {"region": "use1"},
+              {"region": "euw1"},
+            '
+          elif [ $(cat environment) == "qa" ]; then
+            REGIONS='
+              {"region": "euw1"},
+            '
+          elif [ $(cat environment) == "prod" ]; then
+            REGIONS='
+              {"region": "apse3"},
+              {"region": "mec1"},
+              {"region": "apse2"},
+              {"region": "apse1"},
+              {"region": "usw2"},
+              {"region": "use1"},
+              {"region": "euc1"},
+              {"region": "euw1"},
+            '
+          fi
+          echo ::set-output name=regions-list::{\"include\":[$REGIONS]}
+  # merging_pr:
+  #   runs-on: ubuntu-latest
+  #   environment: 'DEV-BLUE-GREEN'
+  #   needs: [set_config]
+  #   steps:
+  #     - name: Checkout
+  #       uses: actions/checkout@v4
+  #       with:
+  #         repository: Vonage/1vapigw-k8s
+  #         token: ${{ secrets.GH_PAT }}
+  #         path: k8s
+  #         ref: ${{ needs.set_config.outputs.TARGET_BRANCH }}
+  #     - name: Merging PR
+  #       env:
+  #         GH_TOKEN: ${{ secrets.GH_PAT }}
+  #       run: |-
+  #         cd ./k8s
+  #         gh pr comment ${{needs.set_config.outputs.PR_NUMBER}} --body  "bors merge"
+  #         sleep 30
+  #         if gh pr view ${{ needs.set_config.outputs.PR_NUMBER }} | grep "Merged"; then
+  #           echo "Pull request ${{ needs.set_config.outputs.PR_NUMBER }} successfully merged into master"
+  #         else
+  #           exit 1
+  #         fi
+  # slack_notification_success:
+  #   runs-on: ubuntu-latest 
+  #   needs: [merging_pr, set_config]
+  #   if: success()
+  #   steps:     
+  #     - name: Slack Notification
+  #       id: slack
+  #       uses: slackapi/slack-github-action@v1.25.0
+  #       with:
+  #         payload: |
+  #           {
+  #             "text": "PR has been merged successfully. Check PR status here: https://github.com/Vonage/1vapigw-k8s/pull/${{needs.set_config.outputs.PR_NUMBER}}\nGitHub Action build result: ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/job/${{ github.job_id }}\n${{ github.event.pull_request.html_url || github.event.head_commit.url }}"
+  #           }
+  #       env:
+  #         SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
+  # slack_notification_failure:
+  #   runs-on: ubuntu-latest 
+  #   needs: [merging_pr, set_config]
+  #   if: failure()
+  #   steps:     
+  #     - name: Slack Notification
+  #       id: slack
+  #       uses: slackapi/slack-github-action@v1.25.0
+  #       with:
+  #         payload: |
+  #           {
+  #             "text": "Error occured while merging pr. Check PR status here: https://github.com/Vonage/1vapigw-k8s/pull/${{needs.set_config.outputs.PR_NUMBER}}"
+  #           }
+  #       env:
+  #         SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
+  # perform_sanity_tests:
+  #   runs-on: ubuntu-latest
+  #   needs: [merging_pr, set_config]
+  #   strategy:
+  #     max-parallel: 1
+  #     matrix: ${{ fromJson(needs.set_config.outputs.regions-list) }}
+  #   steps:
+  #     - name: Checkout
+  #       uses: actions/checkout@v4
+  #       with:
+  #         repository: Vonage/1vapigw-k8s
+  #         token: ${{ secrets.GH_PAT }}
+  #         path: k8s
+  #     - name: Run Sanity Tests
+  #       continue-on-error: true
+  #       run: |-
+  #         cd k8s/utils
+  #         bash run-tests.sh ${{ needs.set_config.outputs.ENV_VAR }} ${{ matrix.region }} 1
+  # save_data:
+  #   runs-on: ubuntu-latest
+  #   needs: set_config
+  #   steps:
+  #     - name: Save data
+  #       run: |
+  #         mkdir -p ./data
+  #         echo ${{ needs.set_config.outputs.TARGET_BRANCH }} > ./data/targetbranch
+  #         echo ${{ needs.set_config.outputs.ENV_VAR }} > ./data/environment
+  #         echo ${{ needs.set_config.outputs.PR_NUMBER }} > ./data/pr
+  #     - uses: actions/upload-artifact@v4
+  #       with:
+  #         name: inputdata
+  #         path: data/

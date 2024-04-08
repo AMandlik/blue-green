@@ -1,0 +1,50 @@
+name: workflow3
+
+on:
+  workflow_run:
+    workflows: 
+      - workflow2
+    types: [completed]
+
+permissions: write-all
+jobs:
+  w3:
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    steps:
+    - name: 'Download artifact'
+      uses: actions/github-script@v6
+      with:
+        script: |
+          let allArtifacts = await github.rest.actions.listWorkflowRunArtifacts({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: context.payload.workflow_run.id,
+          });
+          let matchArtifact = allArtifacts.data.artifacts.filter((artifact) => {
+            return artifact.name == "inputdata"
+          })[0];
+          let download = await github.rest.actions.downloadArtifact({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              artifact_id: matchArtifact.id,
+              archive_format: 'zip',
+          });
+          let fs = require('fs');
+          fs.writeFileSync(`${process.env.GITHUB_WORKSPACE}/inputdata.zip`, Buffer.from(download.data));
+
+    - name: 'Unzip artifact'
+      run: unzip inputdata.zip
+
+    - name: Set env
+      id: environment-var
+      run: |
+        targetbranch=$(cat targetbranch)
+        aws_env=$(cat enviro)
+        echo $aws_env
+        echo $targetbranch
+
+    - name: Set Output Variables
+      id: environment
+      run: |
+        echo "merge branch"

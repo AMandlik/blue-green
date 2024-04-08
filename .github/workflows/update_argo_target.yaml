@@ -1,0 +1,183 @@
+name: Update Target Branch Passive Cluster(subworkflow1)
+
+on:
+  workflow_dispatch:
+    inputs:
+      TARGET_BRANCH:
+        description: "Feature branch with updated changes"
+        required: true
+        type: string
+      ENV_VAR:
+        description: "Environment on which changes needs to be tested"
+        required: true
+        type: choice
+        options:
+          - dev
+          - qa
+          - prod
+      PR_NUMBER:
+        description: "PR number which is opened for feature branch."
+        required: true
+        type: string
+
+jobs:
+  validate_inputs:
+    runs-on: ["self-hosted", "bg-deployment"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          repository: Vonage/1vapigw-k8s
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Lock Master and Target Branch
+        run: |
+          pip3 install jq
+
+          curl -L -H "Accept: application/vnd.github+json" -H "Authorization: Bearer ${{ secrets.GH_PAT }}" -H "X-GitHub-Api-Version: 2022-11-28" https://api.github.com/repos/Vonage/1vapigw-k8s/branches/test-blue-green-deployment/protection >> branch_protection.json
+
+          jq 'del(.required_status_checks.checks)' branch_protection.json >> input.json
+          PROTECTION_PAYLOAD='{
+            "required_status_checks": '"$(jq -r '.required_status_checks' input.json)"',
+            "required_signatures": '"$(jq -r '.required_signatures.enabled' branch_protection.json)"',
+            "enforce_admins": '"$(jq -r '.enforce_admins.enabled' branch_protection.json)"',
+            "required_linear_history": '"$(jq -r '.required_linear_history.enabled' branch_protection.json)"',
+            "allow_force_pushes": '"$(jq -r '.allow_force_pushes.enabled' branch_protection.json)"',
+            "allow_deletions": '"$(jq -r '.allow_deletions.enabled' branch_protection.json)"',
+            "block_creations": '"$(jq -r '.block_creations.enabled' branch_protection.json)"',
+            "required_conversation_resolution": '"$(jq -r '.required_conversation_resolution.enabled' branch_protection.json)"',
+            "lock_branch": true,
+            "allow_fork_syncing": '"$(jq -r '.allow_fork_syncing.enabled' branch_protection.json)"',
+            "required_pull_request_reviews": '"$(jq -r '.required_pull_request_reviews' branch_protection.json)"',
+            "restrictions": '"$(jq -r '.restrictions' branch_protection.json)"'
+          }'
+
+          curl -L -X PUT -H "Accept: application/vnd.github+json" -H "Authorization: Bearer ${{ secrets.GH_PAT }}" -H "X-GitHub-Api-Version: 2022-11-28" https://api.github.com/repos/Vonage/1vapigw-k8s/branches/test-blue-green-deployment/protection -d "$PROTECTION_PAYLOAD"
+
+          curl -L -X PUT -H "Accept: application/vnd.github+json" -H "Authorization: Bearer ${{ secrets.GH_PAT }}" -H "X-GitHub-Api-Version: 2022-11-28" https://api.github.com/repos/Vonage/1vapigw-k8s/branches/${{ inputs.TARGET_BRANCH }}/protection -d "$PROTECTION_PAYLOAD"
+
+      - name: Validate Inputs
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          if ! git ls-remote --exit-code origin "${{inputs.TARGET_BRANCH}}"; then
+            echo "Branch ${{inputs.TARGET_BRANCH}} is not present."
+            exit 1
+          fi
+
+          status=$(gh pr list | grep ${{inputs.PR_NUMBER}})
+          if [ -z "$status" ]; then
+              echo "PR number is invalid"
+              exit 1
+          fi
+
+          if gh pr status -c | grep -A 1 "${{inputs.PR_NUMBER}}" | grep "Not up to date"; then
+            echo "PR ${{inputs.PR_NUMBER}} is out-of-date with the base branch"
+            exit 1
+          fi
+          
+          if ! gh pr view ${{inputs.PR_NUMBER}} | grep -q "Approved"; then
+            echo "PR ${{inputs.PR_NUMBER}} is not approved"
+            exit 1
+          fi
+
+          if ${{inputs.TARGET_BRANCH}} == "master"; then
+            echo "Target branch can't be master"
+            exit 1
+          fi
+
+  set_config:
+    runs-on: ["self-hosted", "bg-deployment"]
+    needs: validate_inputs
+    outputs:
+      regions-list: ${{ steps.environment.outputs.regions-list }}      
+    steps:
+      - name: Set Output Variables
+        id: environment
+        run: |
+          if [ "${{ inputs.ENV_VAR }}" == "dev" ]; then
+            REGIONS='
+              {"region": "use1"},
+              {"region": "euw1"},
+            '
+          elif [ "${{ inputs.ENV_VAR }}" == "qa" ]; then
+            REGIONS='
+              {"region": "euw1"},
+            '
+          elif [ "${{ inputs.ENV_VAR }}" == "prod" ]; then
+            REGIONS='
+              {"region": "apse3"},
+              {"region": "mec1"},
+              {"region": "apse2"},
+              {"region": "apse1"},
+              {"region": "usw2"},
+              {"region": "use1"},
+              {"region": "euc1"},
+              {"region": "euw1"},
+            '
+          fi
+          echo ::set-output name=regions-list::{\"include\":[$REGIONS]}
+
+  update_targate_branch:
+    runs-on: ["self-hosted", "bg-deployment"]
+    needs: [set_config,validate_inputs]
+    strategy:
+      matrix: ${{ fromJson(needs.set_config.outputs.regions-list) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: master
+          path: tf
+
+      - name: Switching Argocd target branch
+        env:
+          KUBE_HOST: ${{ inputs.ENV_VAR }}_${{ matrix.region }}_C2_HOST
+          AUTHORIZATION_TOKEN: ${{ inputs.ENV_VAR }}_${{ matrix.region }}_C2_TOKEN
+        run: |-
+          KUBE_HOST=${{ secrets[env.KUBE_HOST] }}
+          AUTHORIZATION_TOKEN=${{ secrets[env.AUTHORIZATION_TOKEN] }}
+          python3 tf/scripts/blue-green-deployment/argo_target_update.py update_app_set ${{inputs.TARGET_BRANCH}}
+          python3 tf/scripts/blue-green-deployment/argo_target_update.py update_associate_apps ${{inputs.TARGET_BRANCH}}
+          status=python3 tf/scripts/blue-green-deployment/argo_target_update.py restart_gateway_pods nexmo-gloo
+          if [ "$status" = false ]; then
+              echo "Gateway pods are not restarted"
+              exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          repository: Vonage/1vapigw-k8s
+          token: ${{ secrets.GH_PAT }}
+          path: k8s
+
+      - name: Run Sanity Tests
+        continue-on-error: true
+        run: |-
+          cd k8s/utils
+          bash run-tests.sh ${{ inputs.ENV_VAR }} ${{ matrix.region }} 2
+
+  approval_to_trigger_workflow2:
+    runs-on: ["self-hosted", "bg-deployment"]
+    needs: update_targate_branch
+    environment: 'DEV-BLUE-GREEN'
+    steps:
+      - name: Waiting for Approval
+        run: |
+          echo "Waiting for Approval"
+
+  save_data:
+    runs-on: ["self-hosted", "bg-deployment"]
+    needs: validate_inputs
+    steps:
+      - name: Save Env variable
+        run: |
+          mkdir -p ./data
+          echo ${{ inputs.TARGET_BRANCH }} > ./data/targetbranch
+          echo ${{ inputs.ENV_VAR }} > ./data/environment
+          echo ${{ inputs.PR_NUMBER }} > ./data/pr
+      - uses: actions/upload-artifact@v4
+        with:
+          name: inputdata
+          path: data/

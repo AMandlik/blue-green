@@ -1,0 +1,120 @@
+name: s2
+on:
+  workflow_run:
+    workflows:
+      - s1
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      TARGET_BRANCH:
+        description: "Feature branch with updated changes"
+        required: true
+        type: string
+      ENV_VAR:
+        description: "Environment on which changes needs to be tested"
+        required: true
+        type: choice
+        options:
+          - dev
+          - qa
+          - prod
+      PR_NUMBER:
+        description: "PR number which is opened for feature branch."
+        required: true
+        type: string
+jobs:
+  set_config:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          pwd
+          ls -al
+
+      - run: |
+          pwd
+          ls -al
+      - name: 'Download artifact'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            let allArtifacts = await github.rest.actions.listWorkflowRunArtifacts({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: context.payload.workflow_run.id,
+            });
+            let matchArtifact = allArtifacts.data.artifacts.filter((artifact) => {
+              return artifact.name == "inputdata"
+            })[0];
+            let download = await github.rest.actions.downloadArtifact({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                artifact_id: matchArtifact.id,
+                archive_format: 'zip',
+            });
+            let fs = require('fs');
+            fs.writeFileSync(`${process.env.GITHUB_WORKSPACE}/inputdata.zip`, Buffer.from(download.data));
+
+      - name: Set variables
+        id: environment-var
+        run: |-
+          if [ "${{ github.event_name }}" == "workflow_run" ]; then
+            unzip inputdata.zip
+            echo "ENV_VAR=$(cat environment)" >> "$GITHUB_OUTPUT"
+            echo "TARGET_BRANCH=$(cat targetbranch)" >> "$GITHUB_OUTPUT"
+            echo "PR_NUMBER=$(cat pr)" >> "$GITHUB_OUTPUT"
+            echo "::set-output name=ENV_VAR_LOCAL::$(cat environment)"
+          elif [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "ENV_VAR=${{ inputs.ENV_VAR }}" >> "$GITHUB_OUTPUT"
+            echo "TARGET_BRANCH=${{ inputs.TARGET_BRANCH }}" >> "$GITHUB_OUTPUT"
+            echo "PR_NUMBER=${{ inputs.PR_NUMBER }}" >> "$GITHUB_OUTPUT"
+            echo "::set-output name=ENV_VAR_LOCAL::${{ inputs.ENV_VAR }}"
+          fi
+
+      - name: Set Output Variables
+        id: environment
+        run: |
+          if [ ${{ steps.environment-var.outputs.ENV_VAR_LOCAL }} == "dev" ]; then
+            REGIONS='
+              {"region": "us-east-1", "sanity": "use1"},
+              {"region": "eu-west-1", "sanity": "euw1"},
+            '
+          elif [ ${{ steps.environment-var.outputs.ENV_VAR_LOCAL }} == "qa" ]; then
+            REGIONS='
+              {"region": "eu-west-1", "sanity": "euw1"},
+            '
+          elif [ ${{ steps.environment-var.outputs.ENV_VAR_LOCAL }} == "prod" ]; then
+            REGIONS='
+              {"region": "ap-southeast-3", "sanity": "apse3"},
+              {"region": "me-central-1", "sanity": "mec1"},
+              {"region": "ap-southeast-2", "sanity": "apse3"},
+              {"region": "ap-southeast-1", "sanity": "apse1"},
+              {"region": "us-west-2", "sanity": "usw2"},
+              {"region": "us-east-1", "sanity": "use1"},
+              {"region": "eu-central-1", "sanity": "euc1"},
+              {"region": "eu-west-1", "sanity": "euw1"},
+              '
+          fi
+          echo ::set-output name=regions-list::{\"include\":[$REGIONS]}
+    outputs:
+      regions-list: ${{ steps.environment.outputs.regions-list }}
+      ENV_VAR: ${{ steps.environment-var.outputs.ENV_VAR }}
+      TARGET_BRANCH: ${{ steps.environment-var.outputs.TARGET_BRANCH }}
+      PR_NUMBER: ${{ steps.environment-var.outputs.PR_NUMBER }}
+      
+
+  save_data:
+    runs-on: ubuntu-latest
+    needs: set_config
+    if: ${{ always() && needs.set_config.result == 'success' }}
+    steps:
+      - name: Save data
+        run: |
+          mkdir -p ./data
+          echo ${{ needs.set_config.outputs.TARGET_BRANCH }} > ./data/targetbranch
+          echo ${{ needs.set_config.outputs.ENV_VAR }} > ./data/environment
+          echo ${{ needs.set_config.outputs.PR_NUMBER }} > ./data/pr
+      - uses: actions/upload-artifact@v4
+        with:
+          name: inputdata
+          path: data/
+
